@@ -30,7 +30,10 @@ export async function getPackage(map) {
   if (!Array.isArray(packages) || packages.length === 0) return null;
 
   // beliefs
-  const beliefs = { position: pos, packages };
+  const beliefs ={ 
+        position: pos, 
+        packages 
+    };
 
   // desires: choose package with maximum value
   let maxH = -Infinity;
@@ -76,7 +79,10 @@ export async function setPosition(x, y){
 
 // Function that returns the agent position
 export async function getPosition(){
-    return [agent_position[0], agent_position[1]];
+    return [
+        agent_position[0], 
+        agent_position[1]
+    ];
 }
 
 // Function that return the next move available
@@ -92,7 +98,10 @@ export async function move(map){
   const target = await getPackage(map);
   if (!target) {
     // no package found -> stay
-    return { direction: null, position: [pos.x, pos.y] };
+    return { 
+        direction: null, 
+        position: [pos.x, pos.y] 
+    };
   }
 
   const tx = target.x ?? target[0] ?? 0;
@@ -105,7 +114,9 @@ export async function move(map){
     for (const o of obstaclesRaw) {
       const ox = o.x ?? o[0];
       const oy = o.y ?? o[1];
-      if (ox !== undefined && oy !== undefined) obstacleSet.add(`${ox},${oy}`);
+      if (ox !== undefined && oy !== undefined){
+        obstacleSet.add(`${ox},${oy}`);
+        }
     }
   }
 
@@ -137,19 +148,29 @@ export async function move(map){
     const dist = (nx - tx) * (nx - tx) + (ny - ty) * (ny - ty);
     if (dist < bestDist) {
       bestDist = dist;
-      bestMove = { name: m.name, x: nx, y: ny };
+      bestMove = { 
+            name: m.name, 
+            x: nx, 
+            y: ny 
+        };
     }
   }
 
   if (!bestMove) {
-    return { direction: null, position: [pos.x, pos.y] };
+    return{ 
+        direction: null, 
+        position: [pos.x, pos.y] 
+    };
   }
 
   // update internal agent position
   agent_position[0] = bestMove.x;
   agent_position[1] = bestMove.y;
 
-  return { direction: bestMove.name, position: [bestMove.x, bestMove.y] };
+  return{
+        direction: bestMove.name, 
+        position: [bestMove.x, bestMove.y] 
+    };
 }
 
 
@@ -157,17 +178,26 @@ export async function move(map){
 export async function setDeliveryPosition(posOrX, y){
   if (posOrX === undefined || posOrX === null) return null;
   let x, yy;
-  if (Array.isArray(posOrX)) {
-    x = posOrX[0]; yy = posOrX[1];
-  } else if (typeof posOrX === 'object') {
-    x = posOrX.x ?? posOrX[0]; yy = posOrX.y ?? posOrX[1];
-  } else {
+  if (Array.isArray(posOrX)){
+    x = posOrX[0]; 
+    yy = posOrX[1];
+  }
+  else if (typeof posOrX === 'object'){
+    x = posOrX.x ?? posOrX[0]; 
+    yy = posOrX.y ?? posOrX[1];
+  }
+  else{
     x = posOrX; yy = y;
   }
   if (typeof x !== 'number' || typeof yy !== 'number') return null;
+  
   delivery_position[0] = x;
   delivery_position[1] = yy;
-  return [delivery_position[0], delivery_position[1]];
+  
+  return [
+        delivery_position[0], 
+        delivery_position[1]
+    ];
 }
 
 // alias
@@ -179,12 +209,31 @@ export async function deliverPackage(delivery_position_arg, map){
   // select target
   let target = null;
   if (delivery_position_arg !== undefined && delivery_position_arg !== null) {
-    if (Array.isArray(delivery_position_arg)) target = { x: delivery_position_arg[0], y: delivery_position_arg[1] };
-    else if (typeof delivery_position_arg === 'object') target = { x: delivery_position_arg.x ?? delivery_position_arg[0] ?? 0, y: delivery_position_arg.y ?? delivery_position_arg[1] ?? 0 };
+    if (Array.isArray(delivery_position_arg)){
+      target = {
+        x: delivery_position_arg[0],
+        y: delivery_position_arg[1]
+      };
+    } else if (typeof delivery_position_arg === 'object'){
+      target = {
+        x: delivery_position_arg.x ?? delivery_position_arg[0] ?? 0,
+        y: delivery_position_arg.y ?? delivery_position_arg[1] ?? 0
+      };
+    }
+
     // store it as the current delivery position
-    if (target) { delivery_position[0] = target.x; delivery_position[1] = target.y; }
-  } else if (Array.isArray(delivery_position) && delivery_position.length >= 2) {
-    target = { x: delivery_position[0], y: delivery_position[1] };
+    if (target){
+      delivery_position[0] = target.x;
+      delivery_position[1] = target.y;
+    }
+  }
+
+  // fallback to previously stored delivery_position if available
+  if (!target && Array.isArray(delivery_position) && delivery_position.length >= 2) {
+    target = {
+      x: delivery_position[0],
+      y: delivery_position[1]
+    };
   }
 
   if (!target) return { success: false, reason: 'no_delivery_position' };
@@ -199,7 +248,11 @@ export async function deliverPackage(delivery_position_arg, map){
   // if already at delivery point
   if (pos.x === target.x && pos.y === target.y) {
     delivered = true;
-    return { success: true, delivered: true, position: [pos.x, pos.y] };
+    return{ 
+        success: true, 
+        delivered: true, 
+        position: [pos.x, pos.y] 
+    };
   }
 
   // compute next move towards target (respecting obstacles/bounds if map provided)
@@ -209,7 +262,9 @@ export async function deliverPackage(delivery_position_arg, map){
     for (const o of obstaclesRaw) {
       const ox = o.x ?? o[0];
       const oy = o.y ?? o[1];
-      if (ox !== undefined && oy !== undefined) obstacleSet.add(`${ox},${oy}`);
+      if (ox !== undefined && oy !== undefined){
+        obstacleSet.add(`${ox},${oy}`);
+      }
     }
   }
 
@@ -235,7 +290,14 @@ export async function deliverPackage(delivery_position_arg, map){
     if (obstacleSet.has(`${nx},${ny}`)) continue;
 
     const dist = (nx - target.x) * (nx - target.x) + (ny - target.y) * (ny - target.y);
-    if (dist < bestDist) { bestDist = dist; bestMove = { name: m.name, x: nx, y: ny }; }
+    if (dist < bestDist) { 
+        bestDist = dist; 
+        bestMove = { 
+            name: m.name, 
+            x: nx, 
+            y: ny 
+        }; 
+    }
   }
 
   if (!bestMove){ 
@@ -261,12 +323,12 @@ export async function deliverPackage(delivery_position_arg, map){
     };
   }
 
-  return { 
-    success: false, 
-    moved: true, 
-    direction: bestMove.name, 
-    position: [bestMove.x, bestMove.y] 
-};
+  return{ 
+        success: false, 
+        moved: true, 
+        direction: bestMove.name, 
+        position: [bestMove.x, bestMove.y] 
+    };
 }
 
 // default export for backwards compatibility
