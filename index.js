@@ -4,162 +4,307 @@ import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk';
 
 class BDIAgent {
     constructor() {
-        // Defining socket connection
         this.client = new DjsConnect(
           process.env.URL,
           process.env.TOKEN
         );
 
-        // --- BELIEFS (Memory) ---
-        // We must store information here because we only see a 5-tile radius.
         this.beliefs = {
-            me: { id: null, name: '', x: 5, y: 5, score: 0, penalty: 0 },
-            deliveryZones: new Set(), // Remember red tiles (type 2) 
-            parcels: new Map(),       // Currently visible parcels on the ground
-            carrying: new Map()       // Parcels we are currently holding [cite: 51]
+            me: { id: null, name: '', x: undefined, y: undefined, score: 0, penalty: 0},
+            deliveryZones: new Set(), 
+            parcels: new Map(),       
+            carrying: new Map(),       
+            visitedTiles: new Map(),  
+            mapWalls: new Set(),      // Permanent walls given by the map
+            knownWalls: new Set(),    // Temporary walls (map walls + out-of-bounds/players)
+            unreachable: new Set()    // Parcels or zones A* couldn't find a path to
         };
 
-        // --- INTENTIONS (Current Goal) ---
+        this.exploreWay = null;
         this.currentIntention = 'EXPLORE';
-        
-        // --- LOCK (To prevent action spamming) ---
-        // Moving takes time. We shouldn't send another move command while moving.
         this.isActing = false; 
     }
 
     async start() {
         console.log("Starting BDI Agent...");
 
-        //console.log("Available SDK methods:", Object.getOwnPropertyNames(Object.getPrototypeOf(this.client)));
-        // SENSE: Listen for environment updates and update Beliefs
-        // (Note: Verify exact event names and payload structures in the Deliveroo.js SDK docs)
-        
-        // Map updates (received on connection) [cite: 84]
         this.client.on('map', (tiles) => this.updateMapBeliefs(tiles));
         
-        // Personal state updates [cite: 100]
         this.client.on('you', (me) => {
             this.beliefs.me = me;
         });
         
-        // Parcel updates in our sensing radius [cite: 97]
         this.client.on('parcels', (parcelsData) => this.updateParcelBeliefs(parcelsData));
+
+        process.on('SIGINT', () => {
+            console.log("\nCTRL+C detected. Disconnecting agent...");
+            if (this.client) this.client.disconnect();
+            process.exit(0);
+        });
         
-        // DELIBERATE: Start the BDI Loop
-        // Runs continuously to evaluate what to do next
-        setInterval(() => this.bdiLoop(), 100);
+        setInterval(() => this.bdiLoop(), 10);
     }
 
-    // --- BELIEF REVISION METHODS ---
+    // --- BELIEF REVISION ---
 
     updateMapBeliefs(tiles) {
         if (!Array.isArray(tiles)) return;
         tiles.forEach(tile => {
-            // Type 2 is a red delivery zone 
+            const posKey = `${tile.x},${tile.y}`;
             if (tile.type === 2 || tile.type === '2') {
-                this.beliefs.deliveryZones.add(`${tile.x},${tile.y}`);
+                this.beliefs.deliveryZones.add(posKey);
+            }
+            if (tile.type === 0 || tile.type === '0') {
+                this.beliefs.mapWalls.add(posKey);
+                this.beliefs.knownWalls.add(posKey);
             }
         });
     }
 
-    updateParcelBeliefs(parcelsArray) {
-        this.beliefs.parcels.clear(); // Clear old sight
+    updateParcelBeliefs(parcelsData) {
+        this.beliefs.parcels.clear(); 
         this.beliefs.carrying.clear();
 
-        if (!Array.isArray(parcelsArray)) return;
+        if (!parcelsData) return;
 
-        parcelsArray.forEach(p => {
-            if (p.carriedBy === this.beliefs.me.id) {
-                // We are carrying this parcel
-                this.beliefs.carrying.set(p.id, p);
-            } else if (!p.carriedBy) {
-                // It's on the ground
-                this.beliefs.parcels.set(p.id, p);
+        let parcelsList = [];
+        if (Array.isArray(parcelsData)) parcelsList = parcelsData;
+        else if (parcelsData instanceof Map) parcelsList = Array.from(parcelsData.values());
+        else if (typeof parcelsData === 'object') parcelsList = Object.values(parcelsData);
+
+        parcelsList.forEach(p => {
+            if (!p || typeof p !== 'object') return;
+            
+            const actualParcel = p.parcel ? { ...p.parcel, x: p.x, y: p.y } : p;
+            if (!actualParcel.id) return;
+
+            actualParcel.reward = Number(actualParcel.reward) || 1;
+            
+            if (actualParcel.carriedBy === this.beliefs.me.id) {
+                this.beliefs.carrying.set(actualParcel.id, actualParcel);
+            } else if (!actualParcel.carriedBy || actualParcel.carriedBy === 'none') {
+                this.beliefs.parcels.set(actualParcel.id, actualParcel);
             }
         });
     }
 
-    // --- DELIBERATION & INTENTION LOGIC ---
+    // --- DELIBERATION ---
 
     async bdiLoop() {
-        // If we are currently executing a time-consuming action, wait.
+        if (this.beliefs.me.x === undefined || this.beliefs.me.y === undefined) return; 
         if (this.isActing) return;
 
-        // Desire/Intention Generation 
+        // MID-STRIDE CHECK: If our coordinate is a float, the game engine is moving us. Do nothing!
+        const isMidStride = (Math.abs(this.beliefs.me.x - Math.round(this.beliefs.me.x)) > 0.3) || 
+                            (Math.abs(this.beliefs.me.y - Math.round(this.beliefs.me.y)) > 0.3);
+        if (isMidStride) return;
+
+        const myX = Math.round(this.beliefs.me.x);
+        const myY = Math.round(this.beliefs.me.y);
+        const posKey = `${myX},${myY}`;
+        
+        const currentVisits = this.beliefs.visitedTiles.get(posKey) || 0;
+        this.beliefs.visitedTiles.set(posKey, currentVisits + 1);
+
         if (this.beliefs.carrying.size > 0 && this.beliefs.deliveryZones.size > 0) {
-            // We have a parcel and know where to drop it
             this.currentIntention = 'DELIVER_PARCEL';
         } else if (this.beliefs.parcels.size > 0) {
-            // We see a parcel on the ground
             this.currentIntention = 'GET_PARCEL';
         } else {
-            // We see nothing, we need to find parcels or delivery zones
             this.currentIntention = 'EXPLORE';
         }
 
-        // Execute the chosen intention
         this.isActing = true;
+        let actionTaken = false;
+        
         try {
-            await this.executeIntention();
-        } 
-        catch (error) {
+            actionTaken = this.executeIntention(myX, myY);
+        } catch (error) {
             console.error("Action failed:", error);
         } 
-        finally {
-            // Wait 500ms before allowing the next action to prevent server spam/penalties
-            setTimeout(() => {
-                this.isActing = false; 
-            }, 500); 
+
+        if (!actionTaken) {
+            this.isActing = false;
         }
     }
 
     // --- ACTION EXECUTION ---
 
-    async executeIntention() {
+    executeIntention(myX, myY) {
+
+        if (this.currentIntention === 'GET_PARCEL') {
+            let bestParcel = null;
+            let maxReward = -Infinity;
+            
+            for (const [id, parcel] of this.beliefs.parcels.entries()) {
+                const px = Math.round(parcel.x);
+                const py = Math.round(parcel.y);
+                
+                // If we marked it unreachable previously, but we are right next to it now, forgive it!
+                const dist = Math.abs(myX - px) + Math.abs(myY - py);
+                if (dist <= 2 && this.beliefs.unreachable.has(`${px},${py}`)) {
+                    console.log(`Forgiving unreachable parcel at ${px},${py} because we are close!`);
+                    this.beliefs.unreachable.delete(`${px},${py}`);
+                }
+
+                // Skip if it's currently marked as unreachable
+                if (this.beliefs.unreachable.has(`${px},${py}`)) continue;
+
+                if (parcel.reward > maxReward) {
+                    maxReward = parcel.reward;
+                    bestParcel = parcel;
+                }
+            }
+
+            if (bestParcel) {
+                const px = Math.round(bestParcel.x);
+                const py = Math.round(bestParcel.y);
+
+                if (myX === px && myY === py) {
+                    // WE ARE STANDING ON IT!
+                    console.log(`📦 STANDING ON PARCEL ${bestParcel.id}! Attempting pickup...`);
+                    this.safeInteract('pickup'); 
+                    return true;
+                } else {
+                    // WE ARE WALKING TO IT!
+                    console.log(`Walking towards best parcel at ${px}, ${py}...`);
+                    return this.moveTowards(px, py);
+                }
+            } else {
+                console.log("All visible parcels are unreachable right now. Exploring...");
+                this.currentIntention = 'EXPLORE';
+            }
+        }
+
+        if (this.currentIntention === 'DELIVER_PARCEL') {
+            let targetZone = this.getNearestDeliveryZone();
+
+            if (targetZone) {
+                if (myX === targetZone.x && myY === targetZone.y) {
+                    console.log("Standing on delivery zone! Dropping parcels...");
+                    
+                    // Extract the IDs of every parcel we are currently carrying into an array of strings
+                    const parcelIdsToDrop = Array.from(this.beliefs.carrying.keys());
+                    
+                    // Emit 'putdown', passing the array of IDs and expecting the callback
+                    this.safeInteract('putdown', parcelIdsToDrop); 
+                    return true;
+                } else {
+                    return this.moveTowards(targetZone.x, targetZone.y);
+                }
+            } else {
+                this.currentIntention = 'EXPLORE';
+            }
+        }
+
+        if (this.currentIntention === 'EXPLORE') {
+            // 1. If we already have a distant waypoint, keep using A* to walk to it!
+            if (this.exploreWay) {
+                const wx = this.exploreWay.x;
+                const wy = this.exploreWay.y;
+
+                // Did we reach it?
+                if (myX === wx && myY === wy) {
+                    console.log("📍 Reached exploration waypoint!");
+                    this.exploreWay = null; // Clear it so we pick a new one next loop
+                    return false; 
+                }
+
+                // Ask A* to take us there
+                const success = this.moveTowards(wx, wy);
+                if (!success) {
+                    // If A* says it's unreachable (blocked by walls), abandon the waypoint
+                    this.exploreWay = null;
+                }
+                return success;
+            }
+
+            // We don't have a waypoint. Let's find a distant unvisited area!
+            let bestWaypoint = null;
+            let shortestDist = Infinity;
+
+            // Scan the map around us in chunks of 4 (leveraging our vision radius)
+            for (let x = myX - 20; x <= myX + 20; x += 4) { 
+                for (let y = myY - 20; y <= myY + 20; y += 4) {
+                    const key = `${x},${y}`;
+                    
+                    // Ignore solid walls and places we know we can't reach
+                    if (this.beliefs.knownWalls.has(key)) continue;
+                    if (this.beliefs.unreachable.has(key)) continue;
+
+                    const visits = this.beliefs.visitedTiles.get(key) || 0;
+                    
+                    if (visits === 0) {
+                        // Find the CLOSEST unvisited chunk using Manhattan distance
+                        const dist = Math.abs(myX - x) + Math.abs(myY - y);
+                        if (dist < shortestDist) {
+                            shortestDist = dist;
+                            bestWaypoint = { x, y };
+                        }
+                    }
+                }
+            }
+
+            // Set the new waypoint and start moving!
+            if (bestWaypoint) {
+                console.log(`🧭 Setting new Leapfrog Waypoint at ${bestWaypoint.x}, ${bestWaypoint.y}`);
+                this.exploreWay = bestWaypoint;
+                return this.moveTowards(bestWaypoint.x, bestWaypoint.y);
+            } else {
+                // If trapped or map is fully explored, forget temporary walls/players and try again!
+                console.log("⚠️ I am trapped or map is explored! Clearing temporary walls to escape...");
+                this.beliefs.knownWalls = new Set(this.beliefs.mapWalls);
+                this.beliefs.unreachable.clear();
+                
+                // Force a random move just to push against the boundary
+                const dirs = ['up', 'down', 'left', 'right'];
+                this.safeMove(dirs[Math.floor(Math.random() * dirs.length)]);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    safeMove(direction) {
+        this.isActing = true;
+        let callbackFired = false;
+
+        let targetX = Math.round(this.beliefs.me.x);
+        let targetY = Math.round(this.beliefs.me.y);
         
-      if (this.beliefs.me.x === undefined || this.beliefs.me.y === undefined) {
-            console.log("Waiting for my coordinates from the server...");
-            return; 
-        }
+        if (direction === 'right') targetX += 1;
+        else if (direction === 'left') targetX -= 1;
+        else if (direction === 'up') targetY += 1;
+        else if (direction === 'down') targetY -= 1;
 
-        const myX = this.beliefs.me.x;
-        const myY = this.beliefs.me.y;
+        this.client.emit('move', direction, (status) => {
+            callbackFired = true;
+            if (status === false) {
+                console.log(`⚠️ Move ${direction} failed! Marking ${targetX},${targetY} as impassable.`);
+                this.beliefs.knownWalls.add(`${targetX},${targetY}`);
+            }
+            this.isActing = false; 
+        });
 
-        switch (this.currentIntention) {
-                
-                case 'GET_PARCEL':
-                  // ... (finding best parcel logic)
-                  if (bestParcel) {
-                      if (myX === bestParcel.x && myY === bestParcel.y) {
-                          console.log(`Picking up parcel ${bestParcel.id}`);
-                          this.client.emit('pick_up'); 
-                      } else {
-                          await this.moveTowards(bestParcel.x, bestParcel.y);
-                      }
-                  }
-                  break;
+        // Network failsafe: Increased to 5 seconds to guarantee it waits for cloud server lag
+        setTimeout(() => { if (!callbackFired) this.isActing = false; }, 5000);
+    }
 
-                case 'DELIVER_PARCEL':
-                  // ... (finding nearest zone logic)
-                  if (targetZone) {
-                      if (myX === targetZone.x && myY === targetZone.y) {
-                          console.log("Putting down parcel in delivery zone!");
-                          this.client.emit('put_down'); 
-                      } else {
-                          await this.moveTowards(targetZone.x, targetZone.y);
-                      }
-                  }
-                  break;
+    safeInteract(action, args = null) {
+        this.isActing = true;
+        let callbackFired = false;
 
-                case 'EXPLORE':
-                // Using the exact strings from the project description
-                const directions = ['a', 'w', 's', 'd', 'q', 'e']; 
-                const randomDir = directions[Math.floor(Math.random() * directions.length)];
-                
-                console.log(`Exploring: ${randomDir}`);
-                this.client.emit(randomDir); // Emitting the string directly
-                break;
-        }
+        const callback = (parcelsAffected) => {
+            callbackFired = true;
+            let ids = Array.isArray(parcelsAffected) ? parcelsAffected.map(p => p.id) : [];
+            console.log(`✅ Action '${action}' completed! Affected parcels:`, ids.length > 0 ? ids.join(', ') : 'None');
+            this.isActing = false;
+        };
+
+        if (args) this.client.emit(action, args, callback);
+        else this.client.emit(action, callback);
+
+        setTimeout(() => { if (!callbackFired) { this.isActing = false; } }, 5000);
     }
 
     // --- HELPER METHODS ---
@@ -169,10 +314,13 @@ class BDIAgent {
         
         let nearest = null;
         let minDxDySq = Infinity;
-        const myX = this.beliefs.me.x;
-        const myY = this.beliefs.me.y;
+        const myX = Math.round(this.beliefs.me.x);
+        const myY = Math.round(this.beliefs.me.y);
 
         for (const zoneStr of this.beliefs.deliveryZones) {
+            // Don't target zones we already proved are blocked
+            if (this.beliefs.unreachable.has(zoneStr)) continue;
+
             const [zx, zy] = zoneStr.split(',').map(Number);
             const distSq = (myX - zx) ** 2 + (myY - zy) ** 2;
             if (distSq < minDxDySq) {
@@ -183,24 +331,66 @@ class BDIAgent {
         return nearest;
     }
 
-    // Greedy move
-    async moveTowards(tx, ty) {
-        const myX = this.beliefs.me.x;
-        const myY = this.beliefs.me.y;
+    moveTowards(tx, ty) {
+        const myX = Math.round(this.beliefs.me.x);
+        const myY = Math.round(this.beliefs.me.y);
         
-        const dx = tx - myX;
-        const dy = ty - myY;
+        const nextDirection = this.aStarNextStep(myX, myY, tx, ty);
 
-        if (Math.abs(dx) > Math.abs(dy)) {
-            if (dx > 0) this.client.emit('move_right'); 
-            else this.client.emit('move_left');
+        if (nextDirection) {
+            this.safeMove(nextDirection);
+            return true;
         } else {
-            if (dy > 0) this.client.emit('move_up'); 
-            else this.client.emit('move_down');
+            console.log(`❌ Target ${tx},${ty} is unreachable! Remembering to ignore it.`);
+            this.beliefs.unreachable.add(`${tx},${ty}`); 
+            return false;
         }
+    }
+
+    aStarNextStep(startX, startY, targetX, targetY) {
+        const heuristic = (x, y) => Math.abs(targetX - x) + Math.abs(targetY - y);
+        const openSet = [{ x: startX, y: startY, g: 0, f: heuristic(startX, startY), path: [] }];
+        const closedSet = new Set();
+
+        const moves = [
+            { dir: 'up',    dx: 0,  dy: 1 },
+            { dir: 'down',  dx: 0,  dy: -1 },
+            { dir: 'right', dx: 1,  dy: 0 },
+            { dir: 'left',  dx: -1, dy: 0 }
+        ];
+
+        while (openSet.length > 0) {
+            openSet.sort((a, b) => a.f - b.f);
+            const current = openSet.shift();
+
+            if (current.x === targetX && current.y === targetY) {
+                return current.path.length > 0 ? current.path[0] : null;
+            }
+
+            const currentKey = `${current.x},${current.y}`;
+            if (closedSet.has(currentKey)) continue;
+            closedSet.add(currentKey);
+
+            for (const move of moves) {
+                const nextX = current.x + move.dx;
+                const nextY = current.y + move.dy;
+                const nextKey = `${nextX},${nextY}`;
+
+                if (closedSet.has(nextKey)) continue;
+                if (this.beliefs.knownWalls.has(nextKey)) continue;
+
+                const gScore = current.g + 1; 
+                const fScore = gScore + heuristic(nextX, nextY);
+
+                openSet.push({
+                    x: nextX, y: nextY, g: gScore, f: fScore,
+                    path: [...current.path, move.dir] 
+                });
+            }
+        }
+        return null;
     }
 }
 
-// Instantiate and start
 const agent = new BDIAgent();
 agent.start();
