@@ -17,13 +17,17 @@ class BDIAgent {
             visitedTiles: new Map(),  
             mapWalls: new Set(),      // Permanent walls given by the map
             knownWalls: new Set(),    // Temporary walls (map walls + out-of-bounds/players)
-            unreachable: new Set()    // Parcels or zones A* couldn't find a path to
+            unreachable: new Set(),    // Parcels or zones A* couldn't find a path to
+    
+            collisionCounts: new Map(), // Track collision 
+            mapMaxX: 0,
+            mapMaxY: 0
         };
 
         this.exploreWay = null;
         this.deliveryWay = null;
         this.currentIntention = 'EXPLORE';
-        this.isActing = false; 
+        this.isActing = false;
     }
 
     async start() {
@@ -31,6 +35,8 @@ class BDIAgent {
 
         this.client.on('map', (tiles) => this.updateMapBeliefs(tiles));
         
+        this.client.on('tile', (tile) => this.updateMapBeliefs([tile]));
+
         this.client.on('you', (me) => {
             this.beliefs.me = me;
         });
@@ -48,23 +54,40 @@ class BDIAgent {
             process.exit(0);
         });
         
-        setInterval(() => this.bdiLoop(), 10);
+        setInterval(() => this.bdiLoop(), 250);
     }
 
     // --- BELIEF REVISION ---
 
     updateMapBeliefs(tiles) {
         if (!Array.isArray(tiles)) return;
+        
+        let newZonesFound = 0;
+        
         tiles.forEach(tile => {
+            // Track map boundaries
+            if (tile.x > this.beliefs.mapMaxX) this.beliefs.mapMaxX = tile.x;
+            if (tile.y > this.beliefs.mapMaxY) this.beliefs.mapMaxY = tile.y;
+
             const posKey = `${tile.x},${tile.y}`;
-            if (tile.type === 2 || tile.type === '2') {
-                this.beliefs.deliveryZones.add(posKey);
+            
+            if (tile.type === 2 || tile.type === '2' || tile.delivery || tile.deliveryZone || tile.type === 'delivery') {
+                // Only count it if we haven't seen it before!
+                if (!this.beliefs.deliveryZones.has(posKey)) {
+                    this.beliefs.deliveryZones.add(posKey);
+                    newZonesFound++;
+                }
             }
-            if (tile.type === 0 || tile.type === '0') {
+            if (tile.type === 0 || tile.type === '0' || tile.wall || tile.type === 'wall') {
                 this.beliefs.mapWalls.add(posKey);
                 this.beliefs.knownWalls.add(posKey);
             }
         });
+        
+        // Brag about what we just found during exploration!
+        if (newZonesFound > 0) {
+            console.log(`🗺️ EXPLORATION DISCOVERY: Memorized ${newZonesFound} new delivery zone(s)! (Total known: ${this.beliefs.deliveryZones.size})`);
+        }
     }
 
     updateParcelBeliefs(parcelsData) {
@@ -100,11 +123,17 @@ class BDIAgent {
         if (this.beliefs.me.x === undefined || this.beliefs.me.y === undefined) return; 
         if (this.isActing) return;
 
-        // MID-STRIDE CHECK: If our coordinate is a float, the game engine is moving us. Do nothing!
+        // If our coordinate is a float, the game engine is moving us. Do nothing!
         const isMidStride = (Math.abs(this.beliefs.me.x - Math.round(this.beliefs.me.x)) > 0.3) || 
                             (Math.abs(this.beliefs.me.y - Math.round(this.beliefs.me.y)) > 0.3);
         if (isMidStride) return;
 
+        const MAX_CARRY = 3;
+
+        const isFull = this.beliefs.carrying.size >= MAX_CARRY;
+        const hasParcels = this.beliefs.carrying.size > 0;
+        const seesParcels = this.beliefs.parcels.size > 0;
+        const knowsDelivery = this.beliefs.deliveryZones.size > 0;
         const myX = Math.round(this.beliefs.me.x);
         const myY = Math.round(this.beliefs.me.y);
         const posKey = `${myX},${myY}`;
@@ -112,12 +141,26 @@ class BDIAgent {
         const currentVisits = this.beliefs.visitedTiles.get(posKey) || 0;
         this.beliefs.visitedTiles.set(posKey, currentVisits + 1);
 
-        if (this.beliefs.carrying.size > 0 && this.beliefs.deliveryZones.size > 0) {
+        if (isFull && knowsDelivery) {
+            // Backpack is completely full. Time to deliver!
             this.currentIntention = 'DELIVER_PARCEL';
-        } else if (this.beliefs.parcels.size > 0) {
+        } else if (seesParcels && !isFull) {
+            // We see parcels on the ground AND we have room in the backpack. Grab them!
             this.currentIntention = 'GET_PARCEL';
+        } else if (hasParcels && knowsDelivery) {
+            // We have some parcels, but the radar is empty. Don't waste time exploring, go deliver!
+            this.currentIntention = 'DELIVER_PARCEL';
         } else {
+            // Nothing to grab, or we are holding boxes but don't know where the red squares are yet.
             this.currentIntention = 'EXPLORE';
+        }
+
+        // If we switch tasks, forget our old waypoints so we calculate fresh, closer ones later!
+        if (this.currentIntention !== 'DELIVER_PARCEL') {
+            this.deliveryWaypoint = null;
+        }
+        if (this.currentIntention !== 'EXPLORE') {
+            this.exploreWaypoint = null;
         }
 
         this.isActing = true;
@@ -184,31 +227,39 @@ class BDIAgent {
 
         if (this.currentIntention === 'DELIVER_PARCEL') {
             // If we don't have a delivery waypoint yet, find the closest one NOW and lock onto it.
-            if (!this.deliveryWaypoint) {
-                this.deliveryWaypoint = this.getNearestDeliveryZone();
-                if (this.deliveryWaypoint) {
-                    console.log(`🎯 Locked onto delivery zone at ${this.deliveryWaypoint.x}, ${this.deliveryWaypoint.y}`);
+            if (!this.deliveryWay) {
+                this.deliveryWay = this.getNearestDeliveryZone();
+                if (this.deliveryWay) {
+                    console.log(`🎯 Locked onto delivery zone at ${this.deliveryWay.x}, ${this.deliveryWay.y}`);
                 }
             }
 
             // If we successfully locked onto a zone, walk to it!
-            if (this.deliveryWaypoint) {
-                const tx = this.deliveryWaypoint.x;
-                const ty = this.deliveryWaypoint.y;
+            if (this.deliveryWay) {
+                const tx = this.deliveryWay.x;
+                const ty = this.deliveryWay.y;
 
                 if (myX === tx && myY === ty) {
                     console.log("📍 Standing on delivery zone! Dropping parcels...");
+                    
+                    // Get the exact IDs we want to drop
                     const parcelIdsToDrop = Array.from(this.beliefs.carrying.keys());
+                    
+                    // Wipe the backpack immediately so delayed radar doesn't trick us
+                    this.beliefs.carrying.clear();
+                    
+                    // Send the command
                     this.safeInteract('putdown', parcelIdsToDrop); 
                     
-                    // Clear the waypoint so we are ready for the next delivery
+                    // Force the brain back into explore mode
                     this.deliveryWaypoint = null; 
+                    this.currentIntention = 'EXPLORE';
                     return true;
                 } else {
                     const success = this.moveTowards(tx, ty);
                     if (!success) {
                         // If A* says the zone is blocked, clear the waypoint so we pick a different one next loop!
-                        this.deliveryWaypoint = null;
+                        this.deliveryWay = null;
                     }
                     return success;
                 }
@@ -219,7 +270,7 @@ class BDIAgent {
         }
 
         if (this.currentIntention === 'EXPLORE') {
-            // 1. If we already have a distant waypoint, keep using A* to walk to it!
+            // If we already have a distant waypoint, keep using A* to walk to it!
             if (this.exploreWay) {
                 const wx = this.exploreWay.x;
                 const wy = this.exploreWay.y;
@@ -248,6 +299,13 @@ class BDIAgent {
             for (let x = myX - 20; x <= myX + 20; x += 4) { 
                 for (let y = myY - 20; y <= myY + 20; y += 4) {
                     const key = `${x},${y}`;
+                    
+                    const maxX = this.beliefs.mapMaxX >= 0 ? this.beliefs.mapMaxX : Infinity;
+                    const maxY = this.beliefs.mapMaxY >= 0 ? this.beliefs.mapMaxY : Infinity;
+
+                    if(x < 0 || y < 0 || x > maxX || y > maxY){
+                        continue; //Skip out-of-bounds places
+                    } 
                     
                     // Ignore solid walls and places we know we can't reach
                     if (this.beliefs.knownWalls.has(key)) continue;
@@ -301,15 +359,42 @@ class BDIAgent {
 
         this.client.emit('move', direction, (status) => {
             callbackFired = true;
+            
             if (status === false) {
-                console.log(`⚠️ Move ${direction} failed! Marking ${targetX},${targetY} as impassable.`);
-                this.beliefs.knownWalls.add(`${targetX},${targetY}`);
+                const obstacleKey = `${targetX},${targetY}`;
+                
+                // Track how many times we've bumped into this exact tile
+                const hits = (this.beliefs.collisionCounts.get(obstacleKey) || 0) + 1;
+                this.beliefs.collisionCounts.set(obstacleKey, hits);
+
+                if (hits >= 2) {
+                    // This is not a player, it is a permanent wall!
+                    console.log(`🧱 Obstacle at ${obstacleKey} seems permanent! Marking as solid map wall.`);
+                    this.beliefs.mapWalls.add(obstacleKey);
+                    this.beliefs.knownWalls.add(obstacleKey);
+                } else {
+                    // It might be a player, forgive it in 2 seconds.
+                    console.log(`⚠️ Collision at ${obstacleKey}! Routing around it for 2 seconds...`);
+                    this.beliefs.knownWalls.add(obstacleKey);
+                    
+                    setTimeout(() => {
+                        // Only clear it if it hasn't been upgraded to a permanent wall!
+                        if (!this.beliefs.mapWalls.has(obstacleKey)) {
+                            this.beliefs.knownWalls.delete(obstacleKey);
+                            console.log(`Cleared temporary obstacle at ${obstacleKey}`);
+                        }
+                    }, 500); 
+                }
             }
+            
             this.isActing = false; 
         });
 
-        // Network failsafe: Increased to 5 seconds to guarantee it waits for cloud server lag
-        setTimeout(() => { if (!callbackFired) this.isActing = false; }, 5000);
+        setTimeout(() => { 
+            if (!callbackFired) {
+                this.isActing = false; 
+            } 
+        }, 100);
     }
 
     safeInteract(action, args = null) {
@@ -321,27 +406,30 @@ class BDIAgent {
             let ids = Array.isArray(parcelsAffected) ? parcelsAffected.map(p => p.id) : [];
             console.log(`✅ Action '${action}' completed! Affected parcels:`, ids.length > 0 ? ids.join(', ') : 'None');
 
-            // --- SMART INVENTORY MANAGEMENT ---
             if (action === 'pickup' && Array.isArray(parcelsAffected)) {
-                // Save what we just picked up into our backpack
                 parcelsAffected.forEach(p => this.beliefs.carrying.set(p.id, p));
-            } else if (action === 'putdown' && Array.isArray(parcelsAffected)) {
-                // Remove what we just dropped from our backpack
-                parcelsAffected.forEach(p => this.beliefs.carrying.delete(p.id));
+            } else if (action === 'putdown') {
+                this.beliefs.carrying.clear(); // Ensure it stays clear!
             }
 
-            this.isActing = false;
+            // Wait 800ms to let the server radar catch up to reality!
+            setTimeout(() => {
+                this.isActing = false;
+            }, 100); 
         };
 
         if (args) this.client.emit(action, args, callback);
         else this.client.emit(action, callback);
 
+        // Shorter failsafe so it doesn't hang forever
         setTimeout(() => { 
             if (!callbackFired) {
                 console.log(`⚠️ Server did not respond to ${action}. Unlocking.`);
+                // If it was a putdown, trust that we dropped it and walk away
+                if (action === 'putdown') this.beliefs.carrying.clear(); 
                 this.isActing = false; 
             } 
-        }, 5000);
+        }, 500);
     }
 
     // --- HELPER METHODS ---
@@ -380,7 +468,7 @@ class BDIAgent {
         const myX = Math.round(this.beliefs.me.x);
         const myY = Math.round(this.beliefs.me.y);
         
-        const nextDirection = this.aStarNextStep(myX, myY, tx, ty);
+        const nextDirection = this.aStarAlgorithm(myX, myY, tx, ty);
 
         if (nextDirection) {
             this.safeMove(nextDirection);
@@ -392,7 +480,7 @@ class BDIAgent {
         }
     }
 
-    aStarNextStep(startX, startY, targetX, targetY) {
+    aStarAlgorithm(startX, startY, targetX, targetY) {
         const heuristic = (x, y) => Math.abs(targetX - x) + Math.abs(targetY - y);
         const openSet = [{ x: startX, y: startY, g: 0, f: heuristic(startX, startY), path: [] }];
         const closedSet = new Set();
@@ -420,6 +508,11 @@ class BDIAgent {
                 const nextX = current.x + move.dx;
                 const nextY = current.y + move.dy;
                 const nextKey = `${nextX},${nextY}`;
+
+                // Stop A* from searching the infinite void outside the map!
+                const maxX = this.beliefs.mapMaxX > 0 ? this.beliefs.mapMaxX + 2 : 50;
+                const maxY = this.beliefs.mapMaxY > 0 ? this.beliefs.mapMaxY + 2 : 50;
+                if (nextX < -2 || nextY < -2 || nextX > maxX || nextY > maxY) continue;
 
                 if (closedSet.has(nextKey)) continue;
                 if (this.beliefs.knownWalls.has(nextKey)) continue;
