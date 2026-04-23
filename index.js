@@ -54,7 +54,7 @@ class BDIAgent {
             process.exit(0);
         });
         
-        setInterval(() => this.bdiLoop(), 250);
+        setInterval(() => this.bdiLoop(), 80);
     }
 
     // --- BELIEF REVISION ---
@@ -111,7 +111,8 @@ class BDIAgent {
             // If the radar somehow still sees it in our hands, update it
             if (actualParcel.carriedBy === this.beliefs.me.id) {
                 this.beliefs.carrying.set(actualParcel.id, actualParcel);
-            } else if (!actualParcel.carriedBy || actualParcel.carriedBy === 'none') {
+            } 
+            else if (!actualParcel.carriedBy || actualParcel.carriedBy === 'none') {
                 this.beliefs.parcels.set(actualParcel.id, actualParcel);
             }
         });
@@ -144,23 +145,26 @@ class BDIAgent {
         if (isFull && knowsDelivery) {
             // Backpack is completely full. Time to deliver!
             this.currentIntention = 'DELIVER_PARCEL';
-        } else if (seesParcels && !isFull) {
+        } 
+        else if (seesParcels && !isFull) {
             // We see parcels on the ground AND we have room in the backpack. Grab them!
             this.currentIntention = 'GET_PARCEL';
-        } else if (hasParcels && knowsDelivery) {
+        } 
+        else if (hasParcels && knowsDelivery) {
             // We have some parcels, but the radar is empty. Don't waste time exploring, go deliver!
             this.currentIntention = 'DELIVER_PARCEL';
-        } else {
+        } 
+        else {
             // Nothing to grab, or we are holding boxes but don't know where the red squares are yet.
             this.currentIntention = 'EXPLORE';
         }
 
         // If we switch tasks, forget our old waypoints so we calculate fresh, closer ones later!
         if (this.currentIntention !== 'DELIVER_PARCEL') {
-            this.deliveryWaypoint = null;
+            this.deliveryWay = null;
         }
         if (this.currentIntention !== 'EXPLORE') {
-            this.exploreWaypoint = null;
+            this.exploreWay = null;
         }
 
         this.isActing = true;
@@ -252,10 +256,11 @@ class BDIAgent {
                     this.safeInteract('putdown', parcelIdsToDrop); 
                     
                     // Force the brain back into explore mode
-                    this.deliveryWaypoint = null; 
+                    this.deliveryWay = null; 
                     this.currentIntention = 'EXPLORE';
                     return true;
-                } else {
+                } 
+                else {
                     const success = this.moveTowards(tx, ty);
                     if (!success) {
                         // If A* says the zone is blocked, clear the waypoint so we pick a different one next loop!
@@ -263,7 +268,8 @@ class BDIAgent {
                     }
                     return success;
                 }
-            } else {
+            } 
+            else {
                 console.log("No reachable delivery zones found! Exploring...");
                 this.currentIntention = 'EXPLORE';
             }
@@ -383,7 +389,7 @@ class BDIAgent {
                             this.beliefs.knownWalls.delete(obstacleKey);
                             console.log(`Cleared temporary obstacle at ${obstacleKey}`);
                         }
-                    }, 500); 
+                    }, 2000); 
                 }
             }
             
@@ -412,7 +418,7 @@ class BDIAgent {
                 this.beliefs.carrying.clear(); // Ensure it stays clear!
             }
 
-            // Wait 800ms to let the server radar catch up to reality!
+            // Wait 100ms to let the server radar catch up to reality!
             setTimeout(() => {
                 this.isActing = false;
             }, 100); 
@@ -438,16 +444,18 @@ class BDIAgent {
         if (this.beliefs.deliveryZones.size === 0) return null;
         
         let nearest = null;
-        let minDxDySq = Infinity;
+        let shortestDist = Infinity;
         const myX = Math.round(this.beliefs.me.x);
         const myY = Math.round(this.beliefs.me.y);
 
         for (const zoneStr of this.beliefs.deliveryZones) {
             const [zx, zy] = zoneStr.split(',').map(Number);
             
+            // Manhattan distance: True grid distance
+            const dist = Math.abs(myX - zx) + Math.abs(myY - zy);
+
             // Forgive unreachable zones if we are close!
-            const distToZone = Math.abs(myX - zx) + Math.abs(myY - zy);
-            if (distToZone <= 2 && this.beliefs.unreachable.has(zoneStr)) {
+            if (dist <= 2 && this.beliefs.unreachable.has(zoneStr)) {
                 console.log(`Forgiving unreachable delivery zone at ${zoneStr}!`);
                 this.beliefs.unreachable.delete(zoneStr);
             }
@@ -455,9 +463,9 @@ class BDIAgent {
             // Skip if it is currently marked as blocked by a wall
             if (this.beliefs.unreachable.has(zoneStr)) continue;
 
-            const distSq = (myX - zx) ** 2 + (myY - zy) ** 2;
-            if (distSq < minDxDySq) {
-                minDxDySq = distSq;
+            // Find the closest using Manhattan distance
+            if (dist < shortestDist) {
+                shortestDist = dist;
                 nearest = { x: zx, y: zy };
             }
         }
@@ -474,8 +482,14 @@ class BDIAgent {
             this.safeMove(nextDirection);
             return true;
         } else {
-            console.log(`❌ Target ${tx},${ty} is unreachable! Remembering to ignore it.`);
-            this.beliefs.unreachable.add(`${tx},${ty}`); 
+            const targetKey = `${tx},${ty}`;
+            console.log(`❌ Target ${targetKey} is unreachable! Remembering to ignore it.`);
+            this.beliefs.unreachable.add(targetKey);
+            
+            setTimeout(() => {
+                this.beliefs.unreachable.delete(targetKey);
+                console.log(`⏱️ Reconsidering previously unreachable target ${targetKey} after timeout.`);
+            }, 250);
             return false;
         }
     }
