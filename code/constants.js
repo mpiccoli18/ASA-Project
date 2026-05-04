@@ -1,11 +1,11 @@
-export const MAX_CARRY = 3;
+export const MAX_CARRY = 5;
 export const COLLISION_THRESHOLD = 2;
 export const OBSTACLE_FORGIVE_MS = 2000;
 export const INTERACT_TIMEOUT_MS = 500;
 export const INTERACT_UNLOCK_DELAY_MS = 100;
 export const MOVE_TIMEOUT_MS = 100;
 export const UNREACHABLE_RECONSIDER_MS = 150;
-export const BDI_LOOP_INTERVAL_MS = 80;
+export const BDI_LOOP_INTERVAL_MS = 50;
 export const EXPLORE_RADIUS = 20;
 export const EXPLORE_STEP = 4;
 export const PROXIMITY_FORGIVE_DIST = 2;
