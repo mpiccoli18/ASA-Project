@@ -9,6 +9,7 @@ const MOVES = [
  * A* pathfinding on the game grid.
  * Returns the first direction to take toward (targetX, targetY), or null if unreachable.
  *
+ * @param {import('./BDIAgent.js').Beliefs} beliefs
  * @param {number} startX
  * @param {number} startY
  * @param {number} targetX
@@ -18,7 +19,7 @@ const MOVES = [
  * @param {number} mapMaxY
  * @returns {string|null}
  */
-export function aStar(startX, startY, targetX, targetY, knownWalls, mapMaxX, mapMaxY) {
+export function aStar(beliefs, startX, startY, targetX, targetY, knownWalls, mapMaxX, mapMaxY) {
     const heuristic = (x, y) => Math.abs(targetX - x) + Math.abs(targetY - y);
     const openSet = [{ x: startX, y: startY, g: 0, f: heuristic(startX, startY), path: [] }];
     const closedSet = new Set();
@@ -38,7 +39,11 @@ export function aStar(startX, startY, targetX, targetY, knownWalls, mapMaxX, map
         if (closedSet.has(currentKey)) continue;
         closedSet.add(currentKey);
 
+        const forcedDirection = beliefs.direction.get(currentKey);
         for (const move of MOVES) {
+            if (forcedDirection && move.dir !== forcedDirection) {
+                continue; 
+            }
             const nextX = current.x + move.dx;
             const nextY = current.y + move.dy;
             const nextKey = `${nextX},${nextY}`;

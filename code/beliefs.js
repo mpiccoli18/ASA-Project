@@ -9,6 +9,7 @@ export function createBeliefs() {
         mapWalls: new Set(),
         knownWalls: new Set(),
         unreachable: new Set(),
+        direction: new Map(),
         collisionCounts: new Map(),
         mapMaxX: 0,
         mapMaxY: 0,
@@ -33,6 +34,10 @@ export function updateMapBeliefs(beliefs, tiles) {
 
         const posKey = `${tile.x},${tile.y}`;
 
+        const arrows = { '↑': 'up', '↓': 'down', '→': 'right', '←': 'left' };
+        if (arrows[tile.type]) {
+            beliefs.direction.set(posKey, arrows[tile.type]);
+        }
         if (tile.type === 2 || tile.type === '2' || tile.delivery || tile.deliveryZone || tile.type === 'delivery') {
             if (!beliefs.deliveryZones.has(posKey)) {
                 beliefs.deliveryZones.add(posKey);

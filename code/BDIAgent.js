@@ -203,9 +203,14 @@ export default class BDIAgent {
                 this.exploreWay = null;
                 return false;
             }
-
             const success = this.moveTowards(wx, wy);
-            if (!success) this.exploreWay = null;
+            if (!success) {
+                // If we can't reach this exploration area, pretend we already visited it!
+                console.log(`🚫 Exploration target ${wx},${wy} is trapped. Pretending we visited it so we move on.`);
+                this.beliefs.visitedTiles.set(`${wx},${wy}`, 1); 
+                
+                this.exploreWay = null;
+            }
             return success;
         }
 
@@ -236,15 +241,25 @@ export default class BDIAgent {
             console.log(`🧭 Setting new exploration waypoint at (${bestWaypoint.x}, ${bestWaypoint.y})`);
             this.exploreWay = bestWaypoint;
             return this.moveTowards(bestWaypoint.x, bestWaypoint.y);
+        } else {
+            // If trapped or map is fully explored, forget temporary walls/players and try again!
+            console.log("⚠️ I am trapped or map is explored! Clearing temporary walls to escape...");
+            this.beliefs.knownWalls = new Set(this.beliefs.mapWalls);
+            this.beliefs.unreachable.clear();
+            
+            const myKey = `${myX},${myY}`;
+            const forcedDir = this.beliefs.direction.get(myKey);
+            
+            if (forcedDir) {
+                console.log(`Riding the conveyor belt '${forcedDir}' to escape!`);
+                this.safeMove(forcedDir);
+            } else {
+                // Standard random move
+                const dirs = ['up', 'down', 'left', 'right'];
+                this.safeMove(dirs[Math.floor(Math.random() * dirs.length)]);
+            }
+            return true;
         }
-
-        // Map fully explored or agent is trapped — drop temporary obstacles and escape
-        console.log("⚠️ Map explored or trapped! Clearing temporary walls...");
-        this.beliefs.knownWalls = new Set(this.beliefs.mapWalls);
-        this.beliefs.unreachable.clear();
-        const dirs = ['up', 'down', 'left', 'right'];
-        this.safeMove(dirs[Math.floor(Math.random() * dirs.length)]);
-        return true;
     }
 
     // ─── LOW-LEVEL ACTIONS ───────────────────────────────────────────────────────
@@ -356,7 +371,7 @@ export default class BDIAgent {
     moveTowards(tx, ty) {
         const myX = Math.round(this.beliefs.me.x);
         const myY = Math.round(this.beliefs.me.y);
-        const direction = aStar(myX, myY, tx, ty, this.beliefs.knownWalls, this.beliefs.mapMaxX, this.beliefs.mapMaxY);
+        const direction = aStar(this.beliefs, myX, myY, tx, ty, this.beliefs.knownWalls, this.beliefs.mapMaxX, this.beliefs.mapMaxY);
 
         if (direction) {
             this.safeMove(direction);
