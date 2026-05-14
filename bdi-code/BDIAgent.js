@@ -1,5 +1,5 @@
 import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk';
-import { createBeliefs, updateMapBeliefs, updateParcelBeliefs } from './beliefs.js';
+import { createBeliefs, updateMapBeliefs, updateParcelBeliefs, updateAgentsBeliefs } from './beliefs.js';
 import { aStar } from './pathfinding.js';
 import {
     MAX_CARRY,
@@ -48,6 +48,14 @@ export default class BDIAgent {
         this.client.on('you',     (me)    => { this.beliefs.me = me; });
         this.client.on('sensing', (data)  => {
             updateParcelBeliefs(this.beliefs, data.parcels ?? data);
+            updateAgentsBeliefs(this.beliefs, data.agents);
+        });
+        this.client.on('config', (config) => {
+            console.log("📜 Game Rules loaded!");
+            if (config.parcels) {
+                console.log(`Parcels spawn every: ${config.parcels.generation_event}`);
+                console.log(`Max parcels allowed on map: ${config.parcels.max}`);
+            }
         });
 
         process.on('SIGINT', () => {
@@ -67,8 +75,8 @@ export default class BDIAgent {
 
         // Skip while the game engine is animating the move (coords go fractional mid-stride)
         const isMidStride =
-            Math.abs(this.beliefs.me.x - Math.round(this.beliefs.me.x)) > 0.3 ||
-            Math.abs(this.beliefs.me.y - Math.round(this.beliefs.me.y)) > 0.3;
+            Math.abs(this.beliefs.me.x - Math.round(this.beliefs.me.x)) > 0.1 ||
+            Math.abs(this.beliefs.me.y - Math.round(this.beliefs.me.y)) > 0.1;
         if (isMidStride) return;
 
         const myX = Math.round(this.beliefs.me.x);
@@ -129,10 +137,6 @@ export default class BDIAgent {
             const py = Math.round(parcel.y);
             const key = `${px},${py}`;
 
-            // Forgive parcels that appeared unreachable if we're now standing nearby
-            if (Math.abs(myX - px) + Math.abs(myY - py) <= PROXIMITY_FORGIVE_DIST) {
-                this.beliefs.unreachable.delete(key);
-            }
             if (this.beliefs.unreachable.has(key)) continue;
 
             if (parcel.reward > maxReward) {
@@ -214,7 +218,32 @@ export default class BDIAgent {
             return success;
         }
 
-        // Leapfrog scan: find the closest unvisited tile in chunks of EXPLORE_STEP
+        // Find the closest parcel Spawn
+        if (this.beliefs.parcelZones.size > 0) {
+            let nearestSpawner = null;
+            let shortestDist = Infinity;
+
+            for (const spawnerStr of this.beliefs.parcelZones) {
+                const [sx, sy] = spawnerStr.split(',').map(Number);
+                
+                // Skip if A* previously told us this spawner is blocked by traffic
+                if (this.beliefs.unreachable.has(spawnerStr)) continue;
+
+                const dist = Math.abs(myX - sx) + Math.abs(myY - sy);
+                if (dist < shortestDist) {
+                    shortestDist = dist;
+                    nearestSpawner = { x: sx, y: sy };
+                }
+            }
+
+            if (nearestSpawner) {
+                console.log(`🕵️ Patrolling nearest parcel spawner at (${nearestSpawner.x}, ${nearestSpawner.y})`);
+                this.exploreWay = nearestSpawner;
+                return this.moveTowards(nearestSpawner.x, nearestSpawner.y);
+            }
+        }
+
+        // Fallback: Leapfrog scan (if no spawners known, or all are unreachable)
         let bestWaypoint = null;
         let shortestDist  = Infinity;
         const maxX = this.beliefs.mapMaxX >= 0 ? this.beliefs.mapMaxX : Infinity;
@@ -238,23 +267,21 @@ export default class BDIAgent {
         }
 
         if (bestWaypoint) {
-            console.log(`🧭 Setting new exploration waypoint at (${bestWaypoint.x}, ${bestWaypoint.y})`);
+            console.log(`🧭 Setting new Leapfrog scan waypoint at (${bestWaypoint.x}, ${bestWaypoint.y})`);
             this.exploreWay = bestWaypoint;
             return this.moveTowards(bestWaypoint.x, bestWaypoint.y);
         } else {
-            // If trapped or map is fully explored, forget temporary walls/players and try again!
             console.log("⚠️ I am trapped or map is explored! Clearing temporary walls to escape...");
             this.beliefs.knownWalls = new Set(this.beliefs.mapWalls);
             this.beliefs.unreachable.clear();
             
             const myKey = `${myX},${myY}`;
-            const forcedDir = this.beliefs.direction.get(myKey);
+            const forcedDir = this.beliefs.direction?.get(myKey); // Added the failsafe ? here too!
             
             if (forcedDir) {
                 console.log(`Riding the conveyor belt '${forcedDir}' to escape!`);
                 this.safeMove(forcedDir);
             } else {
-                // Standard random move
                 const dirs = ['up', 'down', 'left', 'right'];
                 this.safeMove(dirs[Math.floor(Math.random() * dirs.length)]);
             }
@@ -283,7 +310,15 @@ export default class BDIAgent {
                 const hits = (this.beliefs.collisionCounts.get(key) || 0) + 1;
                 this.beliefs.collisionCounts.set(key, hits);
 
-                if (hits >= COLLISION_THRESHOLD) {
+                let isPlayer = false;
+                for (const agent of this.beliefs.agents.values()) {
+                    if (Math.round(agent.x) === targetX && Math.round(agent.y) === targetY) {
+                        isPlayer = true;
+                        break;
+                    }
+                }
+
+                if (hits >= COLLISION_THRESHOLD && !isPlayer) {
                     // Repeated collisions mean it's a permanent wall, not a player
                     console.log(`🧱 Obstacle at ${key} is permanent. Marking as wall.`);
                     this.beliefs.mapWalls.add(key);

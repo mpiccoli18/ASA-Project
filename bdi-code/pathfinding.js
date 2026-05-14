@@ -27,6 +27,11 @@ export function aStar(beliefs, startX, startY, targetX, targetY, knownWalls, map
     const maxX = mapMaxX > 0 ? mapMaxX + 2 : 50;
     const maxY = mapMaxY > 0 ? mapMaxY + 2 : 50;
 
+    const occupiedTiles = new Set();
+    for (const agent of beliefs.agents.values()) {
+        occupiedTiles.add(`${Math.round(agent.x)},${Math.round(agent.y)}`);
+    }
+    
     while (openSet.length > 0) {
         openSet.sort((a, b) => a.f - b.f);
         const current = openSet.shift();
@@ -51,7 +56,8 @@ export function aStar(beliefs, startX, startY, targetX, targetY, knownWalls, map
             if (nextX < -2 || nextY < -2 || nextX > maxX || nextY > maxY) continue;
             if (closedSet.has(nextKey)) continue;
             if (knownWalls.has(nextKey)) continue;
-
+            if (occupiedTiles.has(nextKey)) continue;
+            
             const gScore = current.g + 1;
             openSet.push({
                 x: nextX,

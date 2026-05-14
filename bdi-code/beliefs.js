@@ -3,7 +3,9 @@ export function createBeliefs() {
     return {
         me: { id: null, name: '', x: undefined, y: undefined, score: 0, penalty: 0 },
         deliveryZones: new Set(),
+        parcelZones: new Set(),
         parcels: new Map(),
+        agents: new Map(),
         carrying: new Map(),
         visitedTiles: new Map(),
         mapWalls: new Set(),
@@ -27,7 +29,7 @@ export function updateMapBeliefs(beliefs, tiles) {
     if (!Array.isArray(tiles)) return;
 
     let newZonesFound = 0;
-
+    let parcelZoneFound = 0;
     for (const tile of tiles) {
         if (tile.x > beliefs.mapMaxX) beliefs.mapMaxX = tile.x;
         if (tile.y > beliefs.mapMaxY) beliefs.mapMaxY = tile.y;
@@ -38,10 +40,18 @@ export function updateMapBeliefs(beliefs, tiles) {
         if (arrows[tile.type]) {
             beliefs.direction.set(posKey, arrows[tile.type]);
         }
+
         if (tile.type === 2 || tile.type === '2' || tile.delivery || tile.deliveryZone || tile.type === 'delivery') {
             if (!beliefs.deliveryZones.has(posKey)) {
                 beliefs.deliveryZones.add(posKey);
                 newZonesFound++;
+            }
+        }
+
+        if (tile.type === 1 || tile.type === '1' || tile.parcelSpawner || tile.type === 'parcelSpawner') {
+            if (!beliefs.parcelZones.has(posKey)) {
+                beliefs.parcelZones.add(posKey);
+                parcelZoneFound++;
             }
         }
 
@@ -53,6 +63,9 @@ export function updateMapBeliefs(beliefs, tiles) {
 
     if (newZonesFound > 0) {
         console.log(`🗺️ EXPLORATION DISCOVERY: Memorized ${newZonesFound} new delivery zone(s)! (Total known: ${beliefs.deliveryZones.size})`);
+    }
+    if (parcelZoneFound > 0) {
+        console.log(`🗺️ PARCEL ZONE: Memorized ${parcelZoneFound} new delivery zone(s)! (Total known: ${beliefs.parcelZones.size})`);
     }
 }
 
@@ -92,5 +105,35 @@ export function updateParcelBeliefs(beliefs, parcelsData) {
         } else if (!parcel.carriedBy || parcel.carriedBy === 'none') {
             beliefs.parcels.set(parcel.id, parcel);
         }
+    }
+}
+
+/** Replaces the beliefs when other agents are inside the map,
+ *  in order to be able to dodge them in case it hits them
+ * 
+ * @param {import('./BDIAgent.js').Beliefs} beliefs 
+ * @param {object[]|Map|object} agentsData 
+ */
+
+export function updateAgentsBeliefs(beliefs, agentsData) {
+    beliefs.agents.clear();
+
+    if(!agentsData) return;
+
+    let agentList = [];
+    if(Array.isArray(agentsData)) 
+        agentList = agentsData;
+    else if(typeof agentsData == 'object')
+        agentList = Object.values(agentsData);
+
+    for (const a of agentList){
+        if(!a || !a.id || a.id == beliefs.me.id)
+            continue;
+        beliefs.agents.set(
+            a.id, 
+            {   x: a.x, 
+                y: a.y
+            }
+        );
     }
 }
