@@ -32,7 +32,7 @@ import {
 
 export default class BDIAgent {
     constructor() {
-        this.client = new DjsConnect(process.env.URL, process.env.TOKEN);
+        this.client = new DjsConnect(process.env.BDI_URL, process.env.BDI_TOKEN);
         this.beliefs = createBeliefs();
         this.exploreWay = null;
         this.deliveryWay = null;
