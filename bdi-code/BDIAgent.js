@@ -31,17 +31,32 @@ import {
  */
 
 export default class BDIAgent {
-    constructor() {
+    constructor(emitter) {
+        this.teamRadio = emitter;
         this.client = new DjsConnect(process.env.BDI_URL, process.env.BDI_TOKEN);
         this.beliefs = createBeliefs();
+        
         this.exploreWay = null;
         this.deliveryWay = null;
         this.currentIntention = 'EXPLORE';
+        this.llmOverride = null;
         this.isActing = false;
     }
 
     async start() {
         console.log("Starting BDI Agent...");
+
+        // Listen for orders from Agent B
+        this.teamRadio.on('strategy_change', (newStrategy) => {
+            console.log(`\n🗣️ [RADIO RECEIVER] LLM commanded me to: ${newStrategy}`);
+            
+            // If the LLM says 'PAUSE', we clear the override when we want it to resume normal AI behavior
+            if (newStrategy === 'RESUME_NORMAL') {
+                this.llmOverride = null;
+            } else {
+                this.llmOverride = newStrategy;
+            }
+        });
 
         this.client.on('map',     (tiles) => updateMapBeliefs(this.beliefs, tiles));
         this.client.on('tile',    (tile)  => updateMapBeliefs(this.beliefs, [tile]));
@@ -99,6 +114,13 @@ export default class BDIAgent {
             this.currentIntention = 'DELIVER_PARCEL';
         } else {
             this.currentIntention = 'EXPLORE';
+        }
+        this.currentIntention = this.llmOverride ? this.llmOverride : baseIntention;
+
+        // If the LLM commanded a PAUSE, do nothing this loop
+        if (this.currentIntention === 'PAUSE') {
+            this.isActing = false;
+            return; 
         }
 
         // Reset stale waypoints when switching tasks
