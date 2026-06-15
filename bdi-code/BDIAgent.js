@@ -88,7 +88,7 @@ export default class BDIAgent {
         if (this.beliefs.me.x === undefined || this.beliefs.me.y === undefined) return;
         if (this.isActing) return;
 
-        // Skip while the game engine is animating the move (coords go fractional mid-stride)
+        // Skip while the game engine is animating the move
         const isMidStride =
             Math.abs(this.beliefs.me.x - Math.round(this.beliefs.me.x)) > 0.1 ||
             Math.abs(this.beliefs.me.y - Math.round(this.beliefs.me.y)) > 0.1;
@@ -106,15 +106,18 @@ export default class BDIAgent {
         const seesParcels  = this.beliefs.parcels.size > 0;
         const knowsDelivery = this.beliefs.deliveryZones.size > 0;
 
+        // Determine normal BDI intention and store it in baseIntention
+        let baseIntention = 'EXPLORE';
+        
         if (isFull && knowsDelivery) {
-            this.currentIntention = 'DELIVER_PARCEL';
+            baseIntention = 'DELIVER_PARCEL';
         } else if (seesParcels && !isFull) {
-            this.currentIntention = 'GET_PARCEL';
+            baseIntention = 'GET_PARCEL';
         } else if (hasParcels && knowsDelivery) {
-            this.currentIntention = 'DELIVER_PARCEL';
-        } else {
-            this.currentIntention = 'EXPLORE';
+            baseIntention = 'DELIVER_PARCEL';
         }
+
+        // Apply LLM override if one exists
         this.currentIntention = this.llmOverride ? this.llmOverride : baseIntention;
 
         // If the LLM commanded a PAUSE, do nothing this loop
