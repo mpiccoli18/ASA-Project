@@ -164,9 +164,27 @@ export default class LLMAgent {
             this.me = you; 
         });
         
-        this.socket.on('msg', (id, senderName, message) => {
-            if (message.toLowerCase().startsWith('@agent')) {
-                const command = message.substring(6).trim();
+        this.socket.on('msg', (...args) => {
+            // Grab the actual message text safely, no matter how the server formats it
+            let text = "";
+            
+            // If the server sends (id, senderName, message)
+            if (args.length === 3 && typeof args[2] === 'string') {
+                text = args[2];
+            } 
+            // If the server sends a single object (msgObject)
+            else if (args.length === 1 && typeof args[0] === 'object') {
+                text = args[0].msg || args[0].text || args[0].message || "";
+            } 
+            // If the server sends (senderName, message)
+            else if (args.length === 2 && typeof args[1] === 'string') {
+                text = args[1];
+            }
+
+            // Only process if we actually extracted a string
+            if (typeof text === 'string' && text.toLowerCase().startsWith('@agent')) {
+                console.log(`\n💬 [CHAT WAKE WORD DETECTED] Processing command...`);
+                const command = text.substring(6).trim();
                 this.runAgentTurn(command);
             }
         });
