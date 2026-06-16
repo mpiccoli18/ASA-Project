@@ -231,7 +231,7 @@ export default class LLMAgent {
             }
 
             // Only process if we actually extracted a string
-            if (typeof text === 'string') {
+            if (typeof text === 'string' && text.toLowerCase().startsWith('@agent')) {
                 console.log(`\n💬 [CHAT WAKE WORD DETECTED] Processing command...`);
                 const command = text;
                 this.runAgentTurn(command);

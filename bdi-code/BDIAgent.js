@@ -190,6 +190,7 @@ export default class BDIAgent {
             case 'PAUSE':          return true;
             case 'GO_TO':          return this.moveTowards(this.overrideTarget.x, this.overrideTarget.y);
             case 'GET_PARCEL':     return this.executeGetParcel(myX, myY);
+            case 'DROP_PARCEL':    return this.safeInteract('putdown');
             case 'DELIVER_PARCEL': return this.executeDeliverParcel(myX, myY);
             case 'EXPLORE':        return this.executeExplore(myX, myY);
             default:               return false;
