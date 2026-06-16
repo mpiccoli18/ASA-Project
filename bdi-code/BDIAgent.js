@@ -64,11 +64,39 @@ export default class BDIAgent {
             console.log(`\n🗣️ [RADIO RECEIVER] LLM commanded me to: ${newStrategy}`);
             
             // If the LLM says 'PAUSE', we clear the override when we want it to resume normal AI behavior
-            if (newStrategy === 'RESUME_NORMAL') {
+            if (newStrategy === 'DROP_PARCEL') {
+                console.log("📦 Executing tactical relay drop!");
+                const parcelIds = Array.from(this.beliefs.carrying.keys());
+                if (parcelIds.length > 0) {
+                    this.safeInteract('putdown', parcelIds);
+                }
+                this.llmOverride = 'PAUSE'; // Wait for Agent B to come get it
+            } 
+            else if (newStrategy === 'RESUME_NORMAL') {
                 this.llmOverride = null;
             } else {
                 this.llmOverride = newStrategy;
             }
+        });
+
+        this.teamRadio.on('request_status', (callback) => {
+            const status = {
+                x: (this.beliefs.me.x !== undefined && this.beliefs.me.x  !== null) ? Math.round(this.beliefs.me.x ) : 'Unknown',
+                y: (this.beliefs.me.y !== undefined && this.beliefs.me.y  !== null) ? Math.round(this.beliefs.me.y ) : 'Unknown',
+                intention: this.currentIntention,
+                parcelsKnown: this.beliefs.parcels.size,
+                carrying: this.beliefs.carrying.size
+            };
+            
+            console.log(`📡 [RADIO TRANSMITTER] Sending status to LLM:`, status);
+            callback(status); // Send the data back to the LLM
+        });
+
+        this.teamRadio.on('go_to', (coords) => {
+            console.log(`\n🗣️ [RADIO RECEIVER] LLM commanded me to GO_TO: ${coords.x}, ${coords.y}`);
+            this.pddlPlan = [];
+            this.llmOverride = 'GO_TO';
+            this.overrideTarget = { x: parseInt(coords.x), y: parseInt(coords.y) };
         });
 
         this.client.on('map',     (tiles) => updateMapBeliefs(this.beliefs, tiles));
@@ -159,6 +187,8 @@ export default class BDIAgent {
 
     executeIntention(myX, myY) {
         switch (this.currentIntention) {
+            case 'PAUSE':          return true;
+            case 'GO_TO':          return this.moveTowards(this.overrideTarget.x, this.overrideTarget.y);
             case 'GET_PARCEL':     return this.executeGetParcel(myX, myY);
             case 'DELIVER_PARCEL': return this.executeDeliverParcel(myX, myY);
             case 'EXPLORE':        return this.executeExplore(myX, myY);
@@ -167,19 +197,15 @@ export default class BDIAgent {
     }
 
     executeGetParcel(myX, myY) {
-        // If we already have a plan, execute the next step!
-        if (this.pddlPlan && this.pddlPlan.length > 0) {
-            const nextStep = this.pddlPlan.shift(); // Take the first action
-            this.translateAndExecutePDDL(nextStep);
-            return true;
-        }
-
-        // Otherwise, we need to find a target and ask the planner
         let bestParcel = null;
         let maxReward  = -Infinity;
 
+        // Find the best parcel
         for (const parcel of this.beliefs.parcels.values()) {
-            const key = `${Math.round(parcel.x)},${Math.round(parcel.y)}`;
+            const px = Math.round(parcel.x);
+            const py = Math.round(parcel.y);
+            const key = `${px},${py}`;
+
             if (this.beliefs.unreachable.has(key)) continue;
 
             if (parcel.reward > maxReward) {
@@ -196,12 +222,13 @@ export default class BDIAgent {
         const px = Math.round(bestParcel.x);
         const py = Math.round(bestParcel.y);
 
-        console.log(`[GET_PARCEL] Asking PDDL Planner to route to (${px}, ${py})`);
-        const targetKey = `${px},${py}`;
-        const problemString = this.generateProblemString('PICKUP', px, py);
-        
-        this.fetchPlan(this.domainString, problemString, targetKey); 
-        return true;
+        if (myX === px && myY === py) {
+            console.log(`📦 STANDING ON PARCEL ${bestParcel.id}! Attempting pickup...`);
+            this.safeInteract('pickup');
+            return true;
+        }
+
+        return this.moveTowards(px, py);
     }
 
     executeDeliverParcel(myX, myY) {
@@ -451,11 +478,11 @@ export default class BDIAgent {
         }
 
         const targetKey = `${tx},${ty}`;
-        console.log(`❌ Target ${targetKey} is unreachable. Will reconsider in ${UNREACHABLE_RECONSIDER_MS}ms.`);
+        //console.log(`❌ Target ${targetKey} is unreachable. Will reconsider in ${UNREACHABLE_RECONSIDER_MS}ms.`);
         this.beliefs.unreachable.add(targetKey);
         setTimeout(() => {
             this.beliefs.unreachable.delete(targetKey);
-            console.log(`⏱️ Reconsidering previously unreachable target ${targetKey}.`);
+            //console.log(`⏱️ Reconsidering previously unreachable target ${targetKey}.`);
         }, UNREACHABLE_RECONSIDER_MS);
         return false;
     }

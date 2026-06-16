@@ -1,4 +1,4 @@
-export const MAX_CARRY = 3;
+export const MAX_CARRY = 5;
 export const COLLISION_THRESHOLD = 2;
 export const OBSTACLE_FORGIVE_MS = 2000;
 export const INTERACT_TIMEOUT_MS = 5000;

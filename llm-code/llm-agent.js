@@ -13,7 +13,7 @@ export default class LLMAgent {
             apiKey: process.env.LITELLM_API_KEY,
         });
         this.MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
-        this.socket = new DjsConnect(process.env.BDI_URL, process.env.BDI_TOKEN);
+        this.socket = new DjsConnect(process.env.BDI_URL, process.env.LLM_TOKEN);
         
         this.me = { id: null, name: '', x: null, y: null, score: 0 };
 
@@ -85,26 +85,75 @@ export default class LLMAgent {
                 } else {
                     return `Error: Invalid strategy. Must be one of: ${validStrategies.join(', ')}`;
                 }
-            }
+            },
+            get_agent_a_status: async () => {
+                return new Promise((resolve) => {
+                    // Ping Agent A over the radio and wait for a callback
+                    this.teamRadio.emit('request_status', (statusData) => {
+                        if (!statusData) {
+                            resolve("Error: Could not reach Agent A.");
+                            return;
+                        }
+                        const msg = `Agent A is currently at X:${statusData.x}, Y:${statusData.y}. Current task: ${statusData.intention}. It currently sees ${statusData.parcelsKnown} parcels on the map.`;
+                        resolve(msg);
+                    });
+                });
+            },
+            send_agent_a_to: async (coordinates) => {
+                const parts = coordinates.split(',');
+                if (parts.length !== 2) return "Error: Input must be exactly in 'x, y' format.";
+                
+                const x = parseInt(parts[0].trim());
+                const y = parseInt(parts[1].trim());
+                
+                return new Promise((resolve) => {
+                    this.teamRadio.emit('go_to', { x, y });
+                    resolve(`Success: Commanded Agent A to immediately navigate to X:${x}, Y:${y}.`);
+                });
+            },
+            pickup: async () => {
+                return new Promise((resolve) => {
+                    this.socket.emit('pickup', (parcelsAffected) => {
+                        const ids = Array.isArray(parcelsAffected) ? parcelsAffected.map(p => p.id) : [];
+                        if (ids.length > 0) resolve(`Success: Picked up parcels: ${ids.join(', ')}`);
+                        else resolve(`Error: Failed to pick up. There is no parcel here, or you are already full.`);
+                    });
+                });
+            },
+
+            putdown: async () => {
+                return new Promise((resolve) => {
+                    this.socket.emit('putdown', () => {
+                        resolve(`Successfully dropped all carried parcels at current location.`);
+                    });
+                });
+            },
         };
 
         this.SYSTEM_PROMPT = `You are an AI assistant controlling a robot in the DeliverooJS game, and you are the team captain of Agent A.
-        Available tools:
-        - get_my_position(): returns your current x, y coordinates and score.
-        - move(direction): moves you one step. Valid inputs: up, down, left, right.
-        - chat(message): sends a message to the global game chat.
+        
+        Available tools you can use:
+        - get_my_position(): Returns your own current X and Y coordinates, and your current score. Takes no input.
+        - move(direction): Moves your robot one step. Valid inputs: up, down, left, right.
+        - chat(message): Broadcasts a message back to the global game chat.
         - update_team_strategy(strategy): Commands your BDI teammate (Agent A) to change behavior. Valid inputs: GET_PARCEL, DELIVER_PARCEL, EXPLORE, PAUSE.
+        - getTemperature(location): Fetches real-time weather temperature for any city or location name. Input format: Just the city name (e.g., Rome, Trento).
+        - webSearch(input): Searches the web by scraping a page. Input MUST be formatted exactly as: URL | query (e.g., https://en.wikipedia.org/wiki/Trento | summary).
+        - get_agent_a_status(): Asks Agent A for its current coordinates, its active task, and how many parcels it sees. Use this when the user asks about Agent A.
+        - send_agent_a_to(coordinates): Commands Agent A to navigate to a specific X,Y map coordinate. Input MUST be formatted as "x, y" (e.g., 15, 15).
+        - pickup(): Attempts to pick up a parcel on your exact current tile. Takes no input.
+        - putdown(): Drops all parcels you are currently holding onto your current tile. Takes no input.
 
         If you need to use a tool, output ONLY in this exact format:
-        Thought: <your brief reasoning>
-        Action: <tool name>
-        Action Input: <tool input>
+        Thought: <your brief reasoning about why you are calling this tool>
+        Action: <exact tool name from the list above>
+        Action Input: <the specific input required for that tool>
 
-        If you have finished the user's request or no tool is needed, output ONLY in this format:
-        Final Answer: <your final response to the user>`;
+        If you have completely finished the user's request, collected all data, or no tool is needed, output ONLY in this format:
+        Final Answer: <your final response or answer to the user>`;
     }
 
-    async runAgentTurn(userInput, maxIterations = 6) {
+    async runAgentTurn(userInput, maxIterations = 50) {
         let messages = [
             { role: 'system', content: this.SYSTEM_PROMPT },
             { role: 'user', content: userInput }
@@ -182,9 +231,9 @@ export default class LLMAgent {
             }
 
             // Only process if we actually extracted a string
-            if (typeof text === 'string' && text.toLowerCase().startsWith('@agent')) {
+            if (typeof text === 'string') {
                 console.log(`\n💬 [CHAT WAKE WORD DETECTED] Processing command...`);
-                const command = text.substring(6).trim();
+                const command = text;
                 this.runAgentTurn(command);
             }
         });
