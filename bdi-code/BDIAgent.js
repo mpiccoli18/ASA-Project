@@ -1,6 +1,9 @@
 import { DjsConnect } from '@unitn-asa/deliveroo-js-sdk';
+import { onlineSolver } from '@unitn-asa/pddl-client'
 import { createBeliefs, updateMapBeliefs, updateParcelBeliefs, updateAgentsBeliefs } from './beliefs.js';
 import { aStar } from './pathfinding.js';
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import {
     MAX_CARRY,
     COLLISION_THRESHOLD,
@@ -41,11 +44,21 @@ export default class BDIAgent {
         this.currentIntention = 'EXPLORE';
         this.llmOverride = null;
         this.isActing = false;
+        this.pddlPlan = [];
     }
 
     async start() {
         console.log("Starting BDI Agent...");
 
+        // Load the PDDL domain file
+        try {
+            const domainPath = path.resolve('./pddl/domain.pddl'); 
+            this.domainString = await readFile(domainPath, 'utf-8');
+            console.log("📜 PDDL Domain successfully loaded into memory!");
+        } catch (error){
+            console.error("❌ Failed to load domain.pddl! Check the file path.", error);
+            process.exit(1); // Kill the agent if it can't find its brain
+        }
         // Listen for orders from Agent B
         this.teamRadio.on('strategy_change', (newStrategy) => {
             console.log(`\n🗣️ [RADIO RECEIVER] LLM commanded me to: ${newStrategy}`);
@@ -154,14 +167,19 @@ export default class BDIAgent {
     }
 
     executeGetParcel(myX, myY) {
+        // If we already have a plan, execute the next step!
+        if (this.pddlPlan && this.pddlPlan.length > 0) {
+            const nextStep = this.pddlPlan.shift(); // Take the first action
+            this.translateAndExecutePDDL(nextStep);
+            return true;
+        }
+
+        // Otherwise, we need to find a target and ask the planner
         let bestParcel = null;
         let maxReward  = -Infinity;
 
         for (const parcel of this.beliefs.parcels.values()) {
-            const px = Math.round(parcel.x);
-            const py = Math.round(parcel.y);
-            const key = `${px},${py}`;
-
+            const key = `${Math.round(parcel.x)},${Math.round(parcel.y)}`;
             if (this.beliefs.unreachable.has(key)) continue;
 
             if (parcel.reward > maxReward) {
@@ -178,49 +196,42 @@ export default class BDIAgent {
         const px = Math.round(bestParcel.x);
         const py = Math.round(bestParcel.y);
 
-        console.log(`[GET_PARCEL] Me: (${myX}, ${myY}) | Target: (${px}, ${py})`);
-
-        if (myX === px && myY === py) {
-            console.log(`📦 STANDING ON PARCEL ${bestParcel.id}! Attempting pickup...`);
-            this.safeInteract('pickup');
-            this.currentIntention = 'DELIVER_PARCEL';
-            return true;
-        }
-
-        return this.moveTowards(px, py);
+        console.log(`[GET_PARCEL] Asking PDDL Planner to route to (${px}, ${py})`);
+        const targetKey = `${px},${py}`;
+        const problemString = this.generateProblemString('PICKUP', px, py);
+        
+        this.fetchPlan(this.domainString, problemString, targetKey); 
+        return true;
     }
 
     executeDeliverParcel(myX, myY) {
-        if (!this.deliveryWay) {
-            this.deliveryWay = this.getNearestDeliveryZone();
-            if (this.deliveryWay) {
-                console.log(`🎯 Locked onto delivery zone at (${this.deliveryWay.x}, ${this.deliveryWay.y})`);
+        // If we already have a plan, execute the next step!
+        if (this.pddlPlan && this.pddlPlan.length > 0) {
+            const nextStep = this.pddlPlan.shift();
+            this.translateAndExecutePDDL(nextStep);
+            
+            if (this.pddlPlan.length === 0) {
+                 this.currentIntention = 'EXPLORE'; // Done delivering
             }
+            return true;
         }
 
         if (!this.deliveryWay) {
-            console.log("No reachable delivery zones found! Exploring...");
+            this.deliveryWay = this.getNearestDeliveryZone();
+        }
+
+        if (!this.deliveryWay) {
             this.currentIntention = 'EXPLORE';
             return false;
         }
 
         const { x: tx, y: ty } = this.deliveryWay;
-
-        if (myX === tx && myY === ty) {
-            console.log("📍 Standing on delivery zone! Dropping parcels...");
-            const parcelIds = Array.from(this.beliefs.carrying.keys());
-            // Clear immediately so a delayed radar update doesn't trick the deliberation
-            this.beliefs.carrying.clear();
-            this.safeInteract('putdown', parcelIds);
-            this.deliveryWay = null;
-            this.currentIntention = 'EXPLORE';
-            return true;
-        }
-
-        const success = this.moveTowards(tx, ty);
-        // A* couldn't reach this zone — try a different one next loop
-        if (!success) this.deliveryWay = null;
-        return success;
+        console.log(`[DELIVER_PARCEL] Asking PDDL Planner to route to (${tx}, ${ty})`);
+        const targetKey = `${tx},${ty}`;
+        const problemString = this.generateProblemString('DELIVER', tx, ty);
+        
+        this.fetchPlan(this.domainString, problemString, targetKey);
+        return true;
     }
 
     executeExplore(myX, myY) {
@@ -331,6 +342,7 @@ export default class BDIAgent {
             callbackFired = true;
 
             if (status === false) {
+                this.pddlPlan = [];
                 const key  = `${targetX},${targetY}`;
                 const hits = (this.beliefs.collisionCounts.get(key) || 0) + 1;
                 this.beliefs.collisionCounts.set(key, hits);
@@ -447,4 +459,167 @@ export default class BDIAgent {
         }, UNREACHABLE_RECONSIDER_MS);
         return false;
     }
+
+    // ─── PDDL PLANNING ──────────────────────────────────────────────────────────
+
+   async fetchPlan(domainString, problemString, targetKey = null) {
+        console.log("🧠 Asking PDDL Planner for a strategy...");
+        this.isActing = true; 
+
+        try {
+            const plan = await onlineSolver(domainString, problemString); 
+            
+            if (plan && plan.length > 0) {
+                console.log("✅ PDDL Plan found with", plan.length, "steps!");
+                this.pddlPlan = plan; 
+            } else {
+                console.log("⚠️ Planner returned an empty plan. Target might be blocked.");
+                this.pddlPlan = [];
+                
+                if (targetKey) {
+                    this.beliefs.unreachable.add(targetKey);
+                    setTimeout(() => {
+                        this.beliefs.unreachable.delete(targetKey);
+                    }, UNREACHABLE_RECONSIDER_MS);
+                }
+            }
+        } catch (error) {
+            console.error("❌ PDDL Planner failed:", error.message);
+            this.pddlPlan = [];
+            
+            if (targetKey) {
+                this.beliefs.unreachable.add(targetKey);
+                setTimeout(() => {
+                    this.beliefs.unreachable.delete(targetKey);
+                }, UNREACHABLE_RECONSIDER_MS);
+            }
+        } finally {
+            this.isActing = false; 
+        }
+    }
+
+    generateProblemString(goalType, targetX = null, targetY = null) {
+        let objects = "";
+        let init = "";
+        
+        const myX = Math.round(this.beliefs.me.x);
+        const myY = Math.round(this.beliefs.me.y);
+        
+        // Define the Agent's location
+        init += `    (at-agent loc-${myX}-${myY})\n`;
+
+        // Only generate the map within a small radius around the agent and target
+        const buffer = 4; // Extra tiles to allow routing around obstacles
+        const safeTargetX = targetX !== null ? targetX : myX;
+        const safeTargetY = targetY !== null ? targetY : myY;
+
+        const startX = Math.max(0, Math.min(myX, safeTargetX) - buffer);
+        const endX = Math.min(this.beliefs.mapMaxX > 0 ? this.beliefs.mapMaxX : 20, Math.max(myX, safeTargetX) + buffer);
+        
+        const startY = Math.max(0, Math.min(myY, safeTargetY) - buffer);
+        const endY = Math.min(this.beliefs.mapMaxY > 0 ? this.beliefs.mapMaxY : 20, Math.max(myY, safeTargetY) + buffer);
+        
+        for (let x = startX; x <= endX; x++) {
+            for (let y = startY; y <= endY; y++) {
+                const key = `${x},${y}`;
+                if (this.beliefs.knownWalls.has(key)) continue; 
+
+                objects += `loc-${x}-${y} `;
+                
+                // Connect Right (ensure we don't connect outside our bounding box)
+                if (x + 1 <= endX && !this.beliefs.knownWalls.has(`${x+1},${y}`)) {
+                    init += `    (connected loc-${x}-${y} loc-${x+1}-${y})\n`;
+                    init += `    (connected loc-${x+1}-${y} loc-${x}-${y})\n`;
+                }
+                // Connect Up (ensure we don't connect outside our bounding box)
+                if (y + 1 <= endY && !this.beliefs.knownWalls.has(`${x},${y+1}`)) {
+                    init += `    (connected loc-${x}-${y} loc-${x}-${y+1})\n`;
+                    init += `    (connected loc-${x}-${y+1} loc-${x}-${y})\n`;
+                }
+            }
+        }
+
+        // Define Parcels or Delivery Zones based on our exact goal
+        let goal = "";
+
+        if (goalType === 'PICKUP') {
+            objects += `- location\n    target_parcel - parcel`;
+            init += `    (at-parcel target_parcel loc-${targetX}-${targetY})\n`;
+            goal = `(carrying target_parcel)`;
+        } else if (goalType === 'DELIVER') {
+            objects += `- location\n    carried_parcel - parcel`;
+            init += `    (carrying carried_parcel)\n`;
+            init += `    (is-delivery-zone loc-${targetX}-${targetY})\n`;
+            goal = `(delivered carried_parcel)`;
+        }
+
+        return `(define (problem deliveroo-dynamic)
+                (:domain deliveroo)
+                (:objects 
+                    ${objects}
+                )
+                (:init 
+                ${init}  )
+                (:goal 
+                    ${goal}
+                )
+                )`;
+    }
+
+    translateAndExecutePDDL(pddlStep) {
+        console.log(`🤖 PDDL Translating:`, pddlStep); // This will print the actual object so we can see it!
+        
+        try {
+            let action = "";
+            let args = [];
+
+            // Safe extraction: Handle both strings and PddlAction objects
+            if (typeof pddlStep === 'string') {
+                const parts = pddlStep.replace(/[()]/g, '').toLowerCase().split(' ');
+                action = parts[0];
+                args = parts.slice(1);
+            } 
+            else if (typeof pddlStep === 'object') {
+                // Extract action (handling different possible naming conventions in the package)
+                action = (pddlStep.action || pddlStep.name || "").toLowerCase();
+                // Extract arguments safely
+                args = pddlStep.args ? pddlStep.args.map(a => a.toLowerCase()) : [];
+            }
+
+            // Execute the extracted logic
+            if (action === 'move') {
+                const from = args[0].split('-'); // "loc", "5", "26"
+                const to = args[1].split('-');   // "loc", "5", "27"
+                
+                const fromX = parseInt(from[1]);
+                const fromY = parseInt(from[2]);
+                const toX = parseInt(to[1]);
+                const toY = parseInt(to[2]);
+
+                let dir = 'up';
+                if (toX > fromX) dir = 'right';
+                if (toX < fromX) dir = 'left';
+                if (toY > fromY) dir = 'up';
+                if (toY < fromY) dir = 'down';
+
+                this.safeMove(dir);
+            } 
+            else if (action === 'pickup') {
+                this.safeInteract('pickup');
+            } 
+            else if (action === 'drop-at-delivery') {
+                const parcelIds = Array.from(this.beliefs.carrying.keys());
+                this.safeInteract('putdown', parcelIds);
+            } 
+            else {
+                console.log(`⚠️ Unrecognized PDDL action: ${action}`);
+                this.pddlPlan = []; // Abort the plan if we don't know what to do
+            }
+            
+        } catch (error) {
+            console.error("❌ Failed to translate PDDL step:", error);
+            this.pddlPlan = []; // Clear the broken plan so the BDI loop doesn't spam errors
+        }
+    }
 }
+
